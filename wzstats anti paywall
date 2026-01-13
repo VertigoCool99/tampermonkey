@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BO6 Premium Unlock - Correct Slot Order
+// @name         BO6 Premium Unlock - Slot Order Mapping
 // @namespace    http://tampermonkey.net/
-// @version      2.1
-// @description  Remove blur and map attachments with Fire Mods before Lasers
+// @version      2.0
+// @description  Remove blur and map attachments to correct slot order
 // @match        *://wzstats.gg/bo6/meta*
 // @match        *://*.wzstats.gg/bo6/meta*
 // @grant        GM_xmlhttpRequest
@@ -10,92 +10,87 @@
 
 (function() {
     'use strict';
-    
+
     // ========== STATE & CACHES ==========
     let PROCESSED = new WeakSet();
     const attachmentCache = new Map();
     let currentWeaponId = null;
-    let weaponAttachments = [];
+    let weaponAttachments = []; // Store all attachments for current weapon
     let scheduled = false;
-    
-    // ========== CORRECTED SLOT ORDER ==========
+
+    // ========== SLOT ORDER CONFIGURATION ==========
     const SLOT_ORDER = [
-        'optic',        // Position 1: Optic
-        'muzzle',       // Position 2: Muzzle  
-        'barrel',       // Position 3: Barrel
-        'underbarrel',  // Position 4: Underbarrel
-        'magazine',     // Position 5: Magazine
-        'rear grip',    // Position 6: Rear Grip
-        'stock',        // Position 7: Stock
-        'ammunition',   // Position 8: Fire Mods (AMMUNITION comes before LASER)
-        'laser',        // Position 9: Laser
-        'bolt',         // Position 10: Bolt
-        'comb',         // Position 11: Comb
-        'guard',        // Position 12: Guard
-        'trigger action', // Position 13: Trigger Action
-        'pump'          // Position 14: Pump
+        'optic',        // Position 1
+        'muzzle',       // Position 2
+        'barrel',       // Position 3
+        'underbarrel',  // Position 4
+        'magazine',     // Position 5
+        'rear grip',    // Position 6
+        'stock',        // Position 7
+        'laser',        // Position 8
+        'ammunition',   // Position 9 (Fire Mods)
+        'bolt',         // Position 10
+        'comb',         // Position 11
+        'guard',        // Position 12
+        'trigger action' // Position 13
     ];
-    
-    // Map API slot names to display names
-    const SLOT_DISPLAY_NAMES = {
-        'optic': 'OPTIC',
-        'muzzle': 'MUZZLE',
-        'barrel': 'BARREL',
-        'underbarrel': 'UNDERBARREL',
-        'magazine': 'MAGAZINE',
-        'rear grip': 'REAR GRIP',
-        'stock': 'STOCK',
-        'ammunition': 'FIRE MODS',  // Display as "FIRE MODS" instead of "AMMUNITION"
-        'laser': 'LASER',
-        'bolt': 'BOLT',
-        'comb': 'COMB',
-        'guard': 'GUARD',
-        'trigger action': 'TRIGGER',
-        'pump': 'PUMP',
-        'ammo': 'FIRE MODS'  // Alias for ammunition
-    };
-    
+
     // ========== FIXED WEAPON DETECTION ==========
     function getCurrentWeaponId() {
         const opened = document.querySelector('.loadout-container.opened');
         if (!opened) return null;
-        
+
+        // Method 1: Check image alt attribute (most reliable)
         const weaponImage = opened.querySelector('img[alt]');
         if (weaponImage && weaponImage.alt) {
             const weaponName = weaponImage.alt.trim().toLowerCase();
             return weaponName.replace(/[^a-z0-9]/g, '-');
         }
-        
+
+        // Method 2: Check loadout content name
         const nameEl = opened.querySelector('.loadout-content-name h3 div');
         if (nameEl && nameEl.textContent.trim()) {
             const weaponName = nameEl.textContent.trim().toLowerCase();
             return weaponName.replace(/[^a-z0-9]/g, '-');
         }
-        
+
         return null;
     }
-    
+
     // ========== FETCH ATTACHMENT DATA ==========
     function fetchAttachmentsForWeapon(weaponId) {
-        if (!weaponId) return Promise.resolve([]);
-        
+        if (!weaponId) {
+            console.log('No weapon ID provided');
+            return Promise.resolve([]);
+        }
+
         if (attachmentCache.has(weaponId)) {
+            console.log(`Using cached attachments for: ${weaponId}`);
             return Promise.resolve(attachmentCache.get(weaponId));
         }
-        
+
+        console.log(`Fetching attachments for weapon: ${weaponId}`);
+
         return new Promise(resolve => {
             const apiUrl = `https://app.wzstats.gg/warzone/weapons/attachments/all-attachments-for-weapon/?weaponId=${weaponId}&authorId=wzstats-bo6&language=en`;
-            
+            console.log('API URL:', apiUrl);
+
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: apiUrl,
                 onload: res => {
+                    console.log('API Response status:', res.status);
+
                     try {
                         const data = JSON.parse(res.responseText);
+                        console.log(`Received ${data.length} attachments from API`);
+
+                        // Sort attachments by unlock level
                         const sortedAttachments = data
                             .filter(att => att.unlockLevel && att.name && att.slot)
                             .sort((a, b) => a.unlockLevel - b.unlockLevel);
-                        
+
+                        console.log(`Filtered to ${sortedAttachments.length} attachments with slot data`);
                         attachmentCache.set(weaponId, sortedAttachments);
                         resolve(sortedAttachments);
                     } catch (error) {
@@ -103,14 +98,18 @@
                         resolve([]);
                     }
                 },
-                onerror: () => resolve([])
+                onerror: (error) => {
+                    console.error('Error fetching attachment data:', error);
+                    resolve([]);
+                }
             });
         });
     }
-    
+
     // ========== MINIMAL CSS INJECTION ==========
     function injectMinimalCSS() {
         const css = `
+            /* Remove blur effects without breaking layout */
             .blur-content,
             [class*="blur"] {
                 filter: none !important;
@@ -118,26 +117,29 @@
                 backdrop-filter: none !important;
                 -webkit-backdrop-filter: none !important;
             }
-            
+
+            /* Hide premium messages only */
             .premium-locked-container,
             .premium-locked-card {
                 display: none !important;
             }
-            
+
+            /* Unlock all content */
             .locked {
                 opacity: 1 !important;
                 pointer-events: auto !important;
             }
         `;
-        
+
         const style = document.createElement('style');
         style.id = 'bo6-minimal-fix';
         style.textContent = css;
         document.head.appendChild(style);
     }
-    
+
     // ========== SIMPLE BLUR REMOVAL ==========
     function removeBlurSimple() {
+        // Just remove blur from all elements with computed blur styles
         document.querySelectorAll('*').forEach(el => {
             const style = getComputedStyle(el);
             if (style.filter.includes('blur') || style.webkitFilter.includes('blur')) {
@@ -146,43 +148,32 @@
             }
         });
     }
-    
+
     // ========== FORMAT SLOT NAME ==========
     function formatSlotName(slot) {
         if (!slot) return 'ATTACHMENT';
-        const lowerSlot = slot.toLowerCase();
-        return SLOT_DISPLAY_NAMES[lowerSlot] || slot.toUpperCase().replace(/-/g, ' ');
+
+        // Convert slot to readable format
+        const slotMap = {
+            'muzzle': 'MUZZLE',
+            'barrel': 'BARREL',
+            'underbarrel': 'UNDERBARREL',
+            'laser': 'LASER',
+            'optic': 'OPTIC',
+            'stock': 'STOCK',
+            'comb': 'COMB',
+            'rear grip': 'REAR GRIP',
+            'ammunition': 'AMMUNITION',
+            'magazine': 'MAGAZINE',
+            'bolt': 'BOLT',
+            'guard': 'GUARD',
+            'pump': 'PUMP',
+            'trigger action': 'TRIGGER ACTION'
+        };
+
+        return slotMap[slot.toLowerCase()] || slot.toUpperCase().replace(/-/g, ' ');
     }
-    
-    // ========== GET SLOT TYPE FOR POSITION ==========
-    function getSlotTypeForPosition(positionIndex) {
-        // Your specified order: Optic, Muzzle, Barrel, Underbarrel, Magazine, Rear Grip, Stock, Fire Mods, Laser
-        const customOrder = [
-            'optic',        // 1: Optic
-            'muzzle',       // 2: Muzzle
-            'barrel',       // 3: Barrel
-            'underbarrel',  // 4: Underbarrel
-            'magazine',     // 5: Magazine
-            'rear grip',    // 6: Rear Grip
-            'stock',        // 7: Stock
-            'ammunition',   // 8: Fire Mods (before Laser!)
-            'laser'         // 9: Laser
-        ];
-        
-        // If position is within custom order, use it
-        if (positionIndex < customOrder.length) {
-            return customOrder[positionIndex];
-        }
-        
-        // Otherwise fall back to full SLOT_ORDER
-        if (positionIndex < SLOT_ORDER.length) {
-            return SLOT_ORDER[positionIndex];
-        }
-        
-        // Wrap around if needed
-        return SLOT_ORDER[positionIndex % SLOT_ORDER.length];
-    }
-    
+
     // ========== MAP ATTACHMENTS TO SLOT POSITIONS ==========
     function mapAttachmentsToPositions() {
         // Group attachments by slot type
@@ -194,61 +185,96 @@
             }
             attachmentsBySlot[slot].push(att);
         });
-        
-        // Create map of slot -> next available attachment index
-        const slotUsageIndex = {};
-        
+
+        console.log('Attachments grouped by slot:', attachmentsBySlot);
+
+        // Create map of slot -> next available attachment for that slot
+        const slotUsageTracker = {};
+        SLOT_ORDER.forEach(slot => {
+            slotUsageTracker[slot] = 0; // Track how many of this slot we've used
+        });
+
+        // Map each position to an attachment based on slot order
+        const positionMap = {};
+
         // Get all attachment slots on the page
         const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
-        const positionMap = {};
-        
+
+        // For each position on the page, assign an attachment
         attachmentSlots.forEach((slotElement, positionIndex) => {
-            const targetSlotType = getSlotTypeForPosition(positionIndex);
-            
+            // Find which slot type should go in this position
+            // Based on your order: Optic(1), Muzzle(2), Barrel(3), Underbarrel(4), Magazine(5), etc.
+            let targetSlotType = null;
+
+            // Simple mapping: first slot is optic, second is muzzle, etc.
+            if (positionIndex < SLOT_ORDER.length) {
+                targetSlotType = SLOT_ORDER[positionIndex];
+            } else {
+                // If more slots than our order, wrap around or use generic
+                targetSlotType = SLOT_ORDER[positionIndex % SLOT_ORDER.length];
+            }
+
+            console.log(`Position ${positionIndex + 1} should be ${targetSlotType}`);
+
             // Get available attachments for this slot type
             const availableAttachments = attachmentsBySlot[targetSlotType] || [];
-            const usageIndex = slotUsageIndex[targetSlotType] || 0;
-            
-            if (availableAttachments.length > 0 && usageIndex < availableAttachments.length) {
-                // Use next available attachment for this slot
-                const attachment = availableAttachments[usageIndex];
-                positionMap[positionIndex] = {
-                    name: attachment.name,
-                    slot: attachment.slot,
-                    level: attachment.unlockLevel
-                };
-                slotUsageIndex[targetSlotType] = usageIndex + 1;
+
+            if (availableAttachments.length > 0) {
+                // Use the next available attachment for this slot type
+                const usageIndex = slotUsageTracker[targetSlotType] || 0;
+
+                if (usageIndex < availableAttachments.length) {
+                    const attachment = availableAttachments[usageIndex];
+                    positionMap[positionIndex] = {
+                        name: attachment.name,
+                        slot: attachment.slot,
+                        level: attachment.unlockLevel
+                    };
+                    slotUsageTracker[targetSlotType] = usageIndex + 1;
+                } else {
+                    // No more attachments for this slot type
+                    positionMap[positionIndex] = {
+                        name: `${formatSlotName(targetSlotType)} ${positionIndex + 1}`,
+                        slot: targetSlotType,
+                        level: null
+                    };
+                }
             } else {
-                // No attachments available for this slot type
+                // No attachments for this slot type at all
                 positionMap[positionIndex] = {
-                    name: formatSlotName(targetSlotType),
+                    name: `${formatSlotName(targetSlotType)}`,
                     slot: targetSlotType,
                     level: null
                 };
             }
         });
-        
+
+        console.log('Position map:', positionMap);
         return positionMap;
     }
-    
+
     // ========== REPLACE WITH MAPPED ATTACHMENTS ==========
     function replaceWithMappedAttachments() {
         if (weaponAttachments.length === 0) {
+            console.log('No attachment data available');
             applyGenericReplacements();
             return 0;
         }
-        
+
+        // Map attachments to positions
         const positionMap = mapAttachmentsToPositions();
+
+        // Find all attachment slots
         const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
         let replacedCount = 0;
-        
+
         attachmentSlots.forEach((slotElement, positionIndex) => {
             if (PROCESSED.has(slotElement)) return;
-            
+
             const attachmentData = positionMap[positionIndex];
             if (!attachmentData) return;
-            
-            // Update attachment name
+
+            // Update the attachment name
             const nameElement = slotElement.querySelector('.attachment-name-no-image');
             if (nameElement) {
                 const originalText = nameElement.textContent.trim();
@@ -257,40 +283,41 @@
                     replacedCount++;
                 }
             }
-            
-            // Update slot name - use display name from SLOT_DISPLAY_NAMES
+
+            // Update the slot name
             const slotNameElement = slotElement.querySelector('.slot-name-no-image span');
             if (slotNameElement) {
-                // Special handling: "ammunition" should show as "FIRE MODS"
-                const slotType = attachmentData.slot ? attachmentData.slot.toLowerCase() : '';
-                const displayName = SLOT_DISPLAY_NAMES[slotType] || formatSlotName(attachmentData.slot);
-                slotNameElement.textContent = displayName;
+                const slotName = formatSlotName(attachmentData.slot);
+                slotNameElement.textContent = slotName;
             }
-            
+
             PROCESSED.add(slotElement);
         });
-        
+
+        if (replacedCount > 0) {
+            console.log(`Replaced ${replacedCount} attachments using slot mapping`);
+        }
         return replacedCount;
     }
-    
-    // ========== GENERIC REPLACEMENT WITH CORRECT ORDER ==========
+
+    // ========== GENERIC REPLACEMENT AS FALLBACK ==========
     function applyGenericReplacements() {
         PROCESSED = new WeakSet();
-        
-        // Your requested order exactly
-        const displaySlotOrder = [
+
+        // Default slot order for fallback
+        const defaultSlotOrder = [
             'OPTIC',
-            'MUZZLE', 
+            'MUZZLE',
             'BARREL',
             'UNDERBARREL',
             'MAGAZINE',
             'REAR GRIP',
             'STOCK',
-            'FIRE MODS',  // Fire Mods comes before Laser!
-            'LASER'
+            'LASER',
+            'AMMUNITION'
         ];
-        
-        // Your recommended level-based attachments
+
+        // Your recommended attachments for specific levels
         const recommendedAttachments = {
             3: { name: "BARREL EXTENSION", slot: "BARREL" },
             4: { name: "UNDERBARREL GRIP", slot: "UNDERBARREL" },
@@ -301,11 +328,11 @@
             10: { name: "OPTIC", slot: "OPTIC" },
             14: { name: "UNDERBARREL GRIP", slot: "UNDERBARREL" }
         };
-        
+
         const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
-        
+
         attachmentSlots.forEach((slotElement, index) => {
-            // Get level
+            // Get level from level tag
             const levelTag = slotElement.querySelector('.level-tag');
             let level = null;
             if (levelTag) {
@@ -313,104 +340,118 @@
                 const levelMatch = levelText.match(/Level\s+(\d+)/);
                 if (levelMatch) level = parseInt(levelMatch[1], 10);
             }
-            
-            // Determine slot display name based on position
-            let slotName = displaySlotOrder[index] || 'ATTACHMENT';
-            
-            // Determine attachment name
-            let attachmentName = slotName; // Default to slot name
-            
+
+            let attachmentName = 'ATTACHMENT';
+            let slotName = defaultSlotOrder[index] || 'ATTACHMENT';
+
+            // Check for recommended attachment for this level
             if (level !== null && recommendedAttachments[level]) {
-                // Use recommended attachment for this level
                 const recommended = recommendedAttachments[level];
                 attachmentName = recommended.name;
-                // Override slot name based on recommendation
                 slotName = recommended.slot;
             } else if (level !== null) {
                 // Use level-based naming
                 attachmentName = `ATTACHMENT Lvl ${level}`;
+                slotName = defaultSlotOrder[index] || `LEVEL ${level}`;
             }
-            
-            // Update elements
+
+            // Update attachment name
             const nameElement = slotElement.querySelector('.attachment-name-no-image');
             if (nameElement) {
                 nameElement.textContent = ` ${attachmentName} `;
             }
-            
+
+            // Update slot name
             const slotNameElement = slotElement.querySelector('.slot-name-no-image span');
             if (slotNameElement) {
                 slotNameElement.textContent = slotName;
             }
         });
+
+        console.log('Applied generic slot-ordered replacements');
     }
-    
+
     // ========== WEAPON-CHANGE AWARE UPDATER ==========
     async function updateForWeapon() {
         const weaponId = getCurrentWeaponId();
+        console.log('Detected weapon ID:', weaponId);
+
         if (!weaponId) {
+            console.log('No weapon ID detected, using generic names');
             applyGenericReplacements();
             return;
         }
-        
-        if (weaponId === currentWeaponId) return;
-        
+
+        if (weaponId === currentWeaponId) {
+            console.log('Same weapon, skipping fetch');
+            return;
+        }
+
         currentWeaponId = weaponId;
         PROCESSED = new WeakSet();
-        
+
+        console.log(`Fetching attachments for: ${weaponId}`);
         weaponAttachments = await fetchAttachmentsForWeapon(weaponId);
-        
+
         if (weaponAttachments.length === 0) {
+            console.log('No real attachments found, using generic names');
             applyGenericReplacements();
         } else {
+            console.log(`Using ${weaponAttachments.length} real attachments`);
             const replaced = replaceWithMappedAttachments();
             if (replaced === 0) {
+                console.log('No replacements made, applying fallback');
                 applyGenericReplacements();
             }
         }
     }
-    
+
     // ========== DEBOUNCED OBSERVER ==========
     const observer = new MutationObserver(() => {
         if (scheduled) return;
         scheduled = true;
-        
+
         requestAnimationFrame(() => {
             scheduled = false;
             updateForWeapon();
             removeBlurSimple();
         });
     });
-    
+
     // ========== INITIALIZATION ==========
     async function init() {
-        console.log('BO6 Premium Unlock - Correct Slot Order v2.1 loaded');
-        
+        console.log('BO6 Premium Unlock - Slot Order Mapping v2.0 loaded');
+
         injectMinimalCSS();
         removeBlurSimple();
-        
+
+        // Apply generic replacements first
         setTimeout(() => {
             applyGenericReplacements();
         }, 800);
-        
+
+        // Try to load real attachments
         setTimeout(async () => {
             await updateForWeapon();
         }, 2000);
-        
+
+        // Final pass
         setTimeout(() => {
             replaceWithMappedAttachments();
         }, 4000);
-        
+
         observer.observe(document.body, {
             childList: true,
             subtree: true
         });
-        
+
         setInterval(() => {
             replaceWithMappedAttachments();
             removeBlurSimple();
         }, 8000);
     }
-    
+
+    // ========== RUN ON PAGE LOAD ==========
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
