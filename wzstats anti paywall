@@ -1,0 +1,419 @@
+// ==UserScript==
+// @name         BO6 Premium Unlock - Correct Slot Order
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Remove blur and map attachments with Fire Mods before Lasers
+// @match        *://wzstats.gg/bo6/meta*
+// @match        *://*.wzstats.gg/bo6/meta*
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    
+    // ========== STATE & CACHES ==========
+    let PROCESSED = new WeakSet();
+    const attachmentCache = new Map();
+    let currentWeaponId = null;
+    let weaponAttachments = [];
+    let scheduled = false;
+    
+    // ========== CORRECTED SLOT ORDER ==========
+    const SLOT_ORDER = [
+        'optic',        // Position 1: Optic
+        'muzzle',       // Position 2: Muzzle  
+        'barrel',       // Position 3: Barrel
+        'underbarrel',  // Position 4: Underbarrel
+        'magazine',     // Position 5: Magazine
+        'rear grip',    // Position 6: Rear Grip
+        'stock',        // Position 7: Stock
+        'ammunition',   // Position 8: Fire Mods (AMMUNITION comes before LASER)
+        'laser',        // Position 9: Laser
+        'bolt',         // Position 10: Bolt
+        'comb',         // Position 11: Comb
+        'guard',        // Position 12: Guard
+        'trigger action', // Position 13: Trigger Action
+        'pump'          // Position 14: Pump
+    ];
+    
+    // Map API slot names to display names
+    const SLOT_DISPLAY_NAMES = {
+        'optic': 'OPTIC',
+        'muzzle': 'MUZZLE',
+        'barrel': 'BARREL',
+        'underbarrel': 'UNDERBARREL',
+        'magazine': 'MAGAZINE',
+        'rear grip': 'REAR GRIP',
+        'stock': 'STOCK',
+        'ammunition': 'FIRE MODS',  // Display as "FIRE MODS" instead of "AMMUNITION"
+        'laser': 'LASER',
+        'bolt': 'BOLT',
+        'comb': 'COMB',
+        'guard': 'GUARD',
+        'trigger action': 'TRIGGER',
+        'pump': 'PUMP',
+        'ammo': 'FIRE MODS'  // Alias for ammunition
+    };
+    
+    // ========== FIXED WEAPON DETECTION ==========
+    function getCurrentWeaponId() {
+        const opened = document.querySelector('.loadout-container.opened');
+        if (!opened) return null;
+        
+        const weaponImage = opened.querySelector('img[alt]');
+        if (weaponImage && weaponImage.alt) {
+            const weaponName = weaponImage.alt.trim().toLowerCase();
+            return weaponName.replace(/[^a-z0-9]/g, '-');
+        }
+        
+        const nameEl = opened.querySelector('.loadout-content-name h3 div');
+        if (nameEl && nameEl.textContent.trim()) {
+            const weaponName = nameEl.textContent.trim().toLowerCase();
+            return weaponName.replace(/[^a-z0-9]/g, '-');
+        }
+        
+        return null;
+    }
+    
+    // ========== FETCH ATTACHMENT DATA ==========
+    function fetchAttachmentsForWeapon(weaponId) {
+        if (!weaponId) return Promise.resolve([]);
+        
+        if (attachmentCache.has(weaponId)) {
+            return Promise.resolve(attachmentCache.get(weaponId));
+        }
+        
+        return new Promise(resolve => {
+            const apiUrl = `https://app.wzstats.gg/warzone/weapons/attachments/all-attachments-for-weapon/?weaponId=${weaponId}&authorId=wzstats-bo6&language=en`;
+            
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: apiUrl,
+                onload: res => {
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        const sortedAttachments = data
+                            .filter(att => att.unlockLevel && att.name && att.slot)
+                            .sort((a, b) => a.unlockLevel - b.unlockLevel);
+                        
+                        attachmentCache.set(weaponId, sortedAttachments);
+                        resolve(sortedAttachments);
+                    } catch (error) {
+                        console.error('Error parsing API response:', error);
+                        resolve([]);
+                    }
+                },
+                onerror: () => resolve([])
+            });
+        });
+    }
+    
+    // ========== MINIMAL CSS INJECTION ==========
+    function injectMinimalCSS() {
+        const css = `
+            .blur-content,
+            [class*="blur"] {
+                filter: none !important;
+                -webkit-filter: none !important;
+                backdrop-filter: none !important;
+                -webkit-backdrop-filter: none !important;
+            }
+            
+            .premium-locked-container,
+            .premium-locked-card {
+                display: none !important;
+            }
+            
+            .locked {
+                opacity: 1 !important;
+                pointer-events: auto !important;
+            }
+        `;
+        
+        const style = document.createElement('style');
+        style.id = 'bo6-minimal-fix';
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+    
+    // ========== SIMPLE BLUR REMOVAL ==========
+    function removeBlurSimple() {
+        document.querySelectorAll('*').forEach(el => {
+            const style = getComputedStyle(el);
+            if (style.filter.includes('blur') || style.webkitFilter.includes('blur')) {
+                el.style.filter = 'none';
+                el.style.webkitFilter = 'none';
+            }
+        });
+    }
+    
+    // ========== FORMAT SLOT NAME ==========
+    function formatSlotName(slot) {
+        if (!slot) return 'ATTACHMENT';
+        const lowerSlot = slot.toLowerCase();
+        return SLOT_DISPLAY_NAMES[lowerSlot] || slot.toUpperCase().replace(/-/g, ' ');
+    }
+    
+    // ========== GET SLOT TYPE FOR POSITION ==========
+    function getSlotTypeForPosition(positionIndex) {
+        // Your specified order: Optic, Muzzle, Barrel, Underbarrel, Magazine, Rear Grip, Stock, Fire Mods, Laser
+        const customOrder = [
+            'optic',        // 1: Optic
+            'muzzle',       // 2: Muzzle
+            'barrel',       // 3: Barrel
+            'underbarrel',  // 4: Underbarrel
+            'magazine',     // 5: Magazine
+            'rear grip',    // 6: Rear Grip
+            'stock',        // 7: Stock
+            'ammunition',   // 8: Fire Mods (before Laser!)
+            'laser'         // 9: Laser
+        ];
+        
+        // If position is within custom order, use it
+        if (positionIndex < customOrder.length) {
+            return customOrder[positionIndex];
+        }
+        
+        // Otherwise fall back to full SLOT_ORDER
+        if (positionIndex < SLOT_ORDER.length) {
+            return SLOT_ORDER[positionIndex];
+        }
+        
+        // Wrap around if needed
+        return SLOT_ORDER[positionIndex % SLOT_ORDER.length];
+    }
+    
+    // ========== MAP ATTACHMENTS TO SLOT POSITIONS ==========
+    function mapAttachmentsToPositions() {
+        // Group attachments by slot type
+        const attachmentsBySlot = {};
+        weaponAttachments.forEach(att => {
+            const slot = att.slot.toLowerCase();
+            if (!attachmentsBySlot[slot]) {
+                attachmentsBySlot[slot] = [];
+            }
+            attachmentsBySlot[slot].push(att);
+        });
+        
+        // Create map of slot -> next available attachment index
+        const slotUsageIndex = {};
+        
+        // Get all attachment slots on the page
+        const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
+        const positionMap = {};
+        
+        attachmentSlots.forEach((slotElement, positionIndex) => {
+            const targetSlotType = getSlotTypeForPosition(positionIndex);
+            
+            // Get available attachments for this slot type
+            const availableAttachments = attachmentsBySlot[targetSlotType] || [];
+            const usageIndex = slotUsageIndex[targetSlotType] || 0;
+            
+            if (availableAttachments.length > 0 && usageIndex < availableAttachments.length) {
+                // Use next available attachment for this slot
+                const attachment = availableAttachments[usageIndex];
+                positionMap[positionIndex] = {
+                    name: attachment.name,
+                    slot: attachment.slot,
+                    level: attachment.unlockLevel
+                };
+                slotUsageIndex[targetSlotType] = usageIndex + 1;
+            } else {
+                // No attachments available for this slot type
+                positionMap[positionIndex] = {
+                    name: formatSlotName(targetSlotType),
+                    slot: targetSlotType,
+                    level: null
+                };
+            }
+        });
+        
+        return positionMap;
+    }
+    
+    // ========== REPLACE WITH MAPPED ATTACHMENTS ==========
+    function replaceWithMappedAttachments() {
+        if (weaponAttachments.length === 0) {
+            applyGenericReplacements();
+            return 0;
+        }
+        
+        const positionMap = mapAttachmentsToPositions();
+        const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
+        let replacedCount = 0;
+        
+        attachmentSlots.forEach((slotElement, positionIndex) => {
+            if (PROCESSED.has(slotElement)) return;
+            
+            const attachmentData = positionMap[positionIndex];
+            if (!attachmentData) return;
+            
+            // Update attachment name
+            const nameElement = slotElement.querySelector('.attachment-name-no-image');
+            if (nameElement) {
+                const originalText = nameElement.textContent.trim();
+                if (originalText.includes('Locked Content') || originalText.includes('Attachment')) {
+                    nameElement.textContent = ` ${attachmentData.name} `;
+                    replacedCount++;
+                }
+            }
+            
+            // Update slot name - use display name from SLOT_DISPLAY_NAMES
+            const slotNameElement = slotElement.querySelector('.slot-name-no-image span');
+            if (slotNameElement) {
+                // Special handling: "ammunition" should show as "FIRE MODS"
+                const slotType = attachmentData.slot ? attachmentData.slot.toLowerCase() : '';
+                const displayName = SLOT_DISPLAY_NAMES[slotType] || formatSlotName(attachmentData.slot);
+                slotNameElement.textContent = displayName;
+            }
+            
+            PROCESSED.add(slotElement);
+        });
+        
+        return replacedCount;
+    }
+    
+    // ========== GENERIC REPLACEMENT WITH CORRECT ORDER ==========
+    function applyGenericReplacements() {
+        PROCESSED = new WeakSet();
+        
+        // Your requested order exactly
+        const displaySlotOrder = [
+            'OPTIC',
+            'MUZZLE', 
+            'BARREL',
+            'UNDERBARREL',
+            'MAGAZINE',
+            'REAR GRIP',
+            'STOCK',
+            'FIRE MODS',  // Fire Mods comes before Laser!
+            'LASER'
+        ];
+        
+        // Your recommended level-based attachments
+        const recommendedAttachments = {
+            3: { name: "BARREL EXTENSION", slot: "BARREL" },
+            4: { name: "UNDERBARREL GRIP", slot: "UNDERBARREL" },
+            5: { name: "LASER SIGHT", slot: "LASER" },
+            6: { name: "STOCK", slot: "STOCK" },
+            8: { name: "REAR GRIP", slot: "REAR GRIP" },
+            9: { name: "MAGAZINE", slot: "MAGAZINE" },
+            10: { name: "OPTIC", slot: "OPTIC" },
+            14: { name: "UNDERBARREL GRIP", slot: "UNDERBARREL" }
+        };
+        
+        const attachmentSlots = document.querySelectorAll('.attachment-slot-no-image');
+        
+        attachmentSlots.forEach((slotElement, index) => {
+            // Get level
+            const levelTag = slotElement.querySelector('.level-tag');
+            let level = null;
+            if (levelTag) {
+                const levelText = levelTag.textContent.trim();
+                const levelMatch = levelText.match(/Level\s+(\d+)/);
+                if (levelMatch) level = parseInt(levelMatch[1], 10);
+            }
+            
+            // Determine slot display name based on position
+            let slotName = displaySlotOrder[index] || 'ATTACHMENT';
+            
+            // Determine attachment name
+            let attachmentName = slotName; // Default to slot name
+            
+            if (level !== null && recommendedAttachments[level]) {
+                // Use recommended attachment for this level
+                const recommended = recommendedAttachments[level];
+                attachmentName = recommended.name;
+                // Override slot name based on recommendation
+                slotName = recommended.slot;
+            } else if (level !== null) {
+                // Use level-based naming
+                attachmentName = `ATTACHMENT Lvl ${level}`;
+            }
+            
+            // Update elements
+            const nameElement = slotElement.querySelector('.attachment-name-no-image');
+            if (nameElement) {
+                nameElement.textContent = ` ${attachmentName} `;
+            }
+            
+            const slotNameElement = slotElement.querySelector('.slot-name-no-image span');
+            if (slotNameElement) {
+                slotNameElement.textContent = slotName;
+            }
+        });
+    }
+    
+    // ========== WEAPON-CHANGE AWARE UPDATER ==========
+    async function updateForWeapon() {
+        const weaponId = getCurrentWeaponId();
+        if (!weaponId) {
+            applyGenericReplacements();
+            return;
+        }
+        
+        if (weaponId === currentWeaponId) return;
+        
+        currentWeaponId = weaponId;
+        PROCESSED = new WeakSet();
+        
+        weaponAttachments = await fetchAttachmentsForWeapon(weaponId);
+        
+        if (weaponAttachments.length === 0) {
+            applyGenericReplacements();
+        } else {
+            const replaced = replaceWithMappedAttachments();
+            if (replaced === 0) {
+                applyGenericReplacements();
+            }
+        }
+    }
+    
+    // ========== DEBOUNCED OBSERVER ==========
+    const observer = new MutationObserver(() => {
+        if (scheduled) return;
+        scheduled = true;
+        
+        requestAnimationFrame(() => {
+            scheduled = false;
+            updateForWeapon();
+            removeBlurSimple();
+        });
+    });
+    
+    // ========== INITIALIZATION ==========
+    async function init() {
+        console.log('BO6 Premium Unlock - Correct Slot Order v2.1 loaded');
+        
+        injectMinimalCSS();
+        removeBlurSimple();
+        
+        setTimeout(() => {
+            applyGenericReplacements();
+        }, 800);
+        
+        setTimeout(async () => {
+            await updateForWeapon();
+        }, 2000);
+        
+        setTimeout(() => {
+            replaceWithMappedAttachments();
+        }, 4000);
+        
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+        
+        setInterval(() => {
+            replaceWithMappedAttachments();
+            removeBlurSimple();
+        }, 8000);
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
